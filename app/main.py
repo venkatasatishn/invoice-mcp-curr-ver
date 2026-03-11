@@ -5,6 +5,12 @@ from mcp.server.fastmcp import FastMCP
 from app.tools import invoice_pdf_to_standard
 from app.core.errors import AppError
 
+from fastapi import HTTPException
+from pydantic import BaseModel
+import logging
+
+logger = logging.getLogger("invoice_server")
+
 mcp = FastMCP("invoice-standardizer", stateless_http=True)
 
 @mcp.tool()
@@ -39,13 +45,43 @@ class ConvertRequest(BaseModel):
 
 @app.post("/convert")
 def convert(req: ConvertRequest):
-    return invoice_pdf_to_standard(
-        pdf_base64=req.pdf_base64,
-        return_raw_text=req.return_raw_text,
-        force_local_ocr=req.force_local_ocr,
-        ubl_format=req.ubl_format,
-    )
+    try:
+        result = invoice_pdf_to_standard(
+            pdf_base64=req.pdf_base64,
+            return_raw_text=req.return_raw_text,
+            force_local_ocr=req.force_local_ocr,
+            ubl_format=req.ubl_format,
+        )
 
+        # Log success with trace_id if available
+        try:
+            trace_id = (
+                result.get("result", {})
+                      .get("custom_invoice_json", {})
+                      .get("meta", {})
+                      .get("trace_id")
+            )
+        except Exception:
+            trace_id = None
+
+        logger.info("convert_success trace_id=%s", trace_id)
+        return result
+
+    except AppError as e:
+        trace_id = (e.details or {}).get("trace_id")
+        logger.error(
+            "convert_app_error code=%s trace_id=%s message=%s details=%s",
+            e.code,
+            trace_id,
+            e.message,
+            e.details,
+        )
+        raise
+
+    except Exception as e:
+        logger.exception("convert_unhandled_error: %s", str(e))
+        raise
+    
 @app.exception_handler(AppError)
 def app_error_handler(_, exc: AppError):
     return JSONResponse(status_code=exc.http_status, content=exc.to_dict())
